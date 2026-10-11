@@ -2,6 +2,16 @@
 
 API que recebe a série de views por hora de um vídeo e diz se ela parece tráfego real. A resposta traz a classificação (`legit`, `suspicious` ou `inconclusive`), um motivo em português com os números que decidiram e todos os sinais medidos. O critério é um conjunto de regras explícitas. Não há modelo opaco.
 
+## Visão rápida
+
+| Como avaliamos | Onde está a regra | Teste que prova |
+| --- | --- | --- |
+| O motivo dá para ler sem conhecer o código. | `src/classify.ts` (`RULES`), `src/signals.ts` (`explanation` de cada sinal) | `classificador.test.ts`: "o motivo de cada um cita os números que decidiram" |
+| A taxa de falso positivo do README sai do comando, não de uma estimativa escrita à mão. | `src/dataset.ts` (`measure`, `formatReport`), `src/dataset-cli.ts` | `dataset.test.ts`: "a taxa de falso positivo do README é a que o comando mede" e "o README traz o relatório exato que o comando imprime" |
+| Um pico orgânico plausível não cai no mesmo balde de um pico comprado, e o teste mostra a diferença. | `src/signals.ts` (`SIGNALS`), `src/classify.ts` (`RULES`) | `classificador.test.ts`: "os dois chegam à mesma altura, mas só o comprado é suspeito" |
+| O critério está documentado, inclusive o que ele não detecta. | `src/signals.ts`, `src/classify.ts`. Seções Critério e O que ele não detecta. | `dataset.test.ts`: "o README traz o relatório exato que o comando imprime". A linha `bought_drip` mostra as 40 compras diluídas que passam como `legit`. |
+| O dataset é reproduzível. Não depende de rede social real. | `src/dataset.ts` (`generateDataset`, mulberry32) | `dataset.test.ts`: "o arquivo versionado é o que o gerador produz" e "a mesma semente gera a mesma série e outra semente gera outra" |
+
 ## Como rodar
 
 Node 22 ou mais novo.
@@ -88,23 +98,46 @@ O porquê de `too_smooth`: views reais chegam uma a uma, por acaso, como ligaç�
 
 ### Regra de combinação
 
-As regras ficam numa tabela só, `RULES` em `src/classify.ts`. A primeira que casa decide.
+As regras ficam numa tabela só, `RULES` em `src/classify.ts`. A primeira que casa decide. Cada saída traz o número da regra.
 
-| Ordem | Quando | Classificação |
-| --- | --- | --- |
-| 1 | Série com menos de 24 horas | `inconclusive` |
-| 2 | `too_smooth` ou `exact_repetition` | `suspicious` (repetição mecânica) |
-| 3 | `drop_to_zero` | `suspicious` (queda abrupta) |
-| 4 | `spike` e pelo menos 2 de `step_rise`, `flat_top`, `cliff` | `suspicious` (pico comprado) |
-| 5 | `spike` e exatamente 1 de `step_rise`, `flat_top`, `cliff` | `inconclusive` |
-| 6 | `spike` sem nenhum traço de compra | `legit` (pico orgânico) |
-| 7 | Nenhuma das anteriores | `legit` |
+```mermaid
+flowchart TD
+    A{"menos de 24 horas?"} -- sim --> R1["1. inconclusive"]
+    A -- não --> B{"too_smooth ou<br/>exact_repetition?"}
+    B -- sim --> R2["2. suspicious<br/>repetição mecânica"]
+    B -- não --> C{"drop_to_zero?"}
+    C -- sim --> R3["3. suspicious<br/>queda abrupta"]
+    C -- não --> D{"spike?"}
+    D -- não --> R7["7. legit"]
+    D -- sim --> E{"quantos de step_rise,<br/>flat_top e cliff?"}
+    E -- "2 ou 3" --> R4["4. suspicious<br/>pico comprado"]
+    E -- "1" --> R5["5. inconclusive"]
+    E -- "0" --> R6["6. legit<br/>pico orgânico"]
+```
 
 Repetição mecânica e queda abrupta acusam sozinhas porque tráfego real não produz nenhuma das duas. Um pico só acusa com dois traços de compra, porque um vídeo que estoura de verdade pode ter um deles.
 
 ### Pico orgânico contra pico comprado
 
-O teste "os dois chegam à mesma altura, mas só o comprado é suspeito" usa a mesma linha de base de ~200 views por hora e dois picos de ~3.200:
+O teste "os dois chegam à mesma altura, mas só o comprado é suspeito" usa a mesma linha de base de ~200 views por hora e dois picos de ~3.200. As séries do teste, hora a hora:
+
+```text
+hora  orgânico (legit)          comprado (suspicious)
+ 15   █                  233    █                  233
+ 16   █                  199    █                  199
+ 17   ██████           1.204    ████████████████ 3.204   degrau: 100% numa hora
+ 18   ███████████      2.200    ████████████████ 3.200
+ 19   ████████████████ 3.177    ████████████████ 3.177   platô: 6 horas no topo
+ 20   ██████████████   2.855    ████████████████ 3.182
+ 21   █████████████    2.574    ████████████████ 3.193
+ 22   ████████████     2.317    ████████████████ 3.196
+ 23   ██████████       2.082    █                  192   penhasco: some numa hora
+ 24   █████████        1.854    █                  170
+ 25   ████████         1.685    █                  185
+ 26   ████████         1.550    █                  214
+ 27   ███████          1.381    █                  190
+ 28   ██████           1.249    █                  188
+```
 
 | Sinal | Pico orgânico | Pico comprado |
 | --- | --- | --- |
@@ -120,6 +153,19 @@ O teste "o motivo de cada um cita os números que decidiram" confere o motivo in
 ### Um caso em que o classificador prefere não acusar
 
 Um vídeo que estoura numa hora só, porque foi compartilhado por uma conta grande, sobe em degrau como o comprado. Depois decai aos poucos, como o orgânico. Só `step_rise` dispara, e a regra 5 devolve `inconclusive`:
+
+```text
+hora  viral rápido (inconclusive)
+ 16   █                  199
+ 17   ████████████████ 3.204   degrau: 100% numa hora, dispara. Topo de 1 hora, sem platô.
+ 18   ██████████████   2.723   maior queda: 16% da altura, sem penhasco
+ 19   ███████████      2.298
+ 20   ██████████       1.966
+ 21   ████████         1.693
+ 22   ███████          1.457
+ 23   ██████           1.253
+ 24   █████            1.062
+```
 
 > Inconclusivo: o pico tem um traço de compra, mas o resto da forma é de pico orgânico. Um traço só não basta para acusar. O maior valor (3.204 views na hora 17) é 12,3 vezes a mediana da série (261 views por hora). Pico conta a partir de 5 vezes. A maior alta em uma hora antes do pico (de 199 para 3.204, da hora 16 para a 17) fez 100% do caminho da mediana até o pico. Degrau conta a partir de 80%.
 
@@ -175,6 +221,18 @@ Os 2 falsos positivos são virais rápidos que ficaram 3 horas perto do topo ant
 
 O teste "a taxa de falso positivo do README é a que o comando mede" gera o dataset em memória, mede a taxa e compara com a linha em negrito acima. O teste "o README traz o relatório exato que o comando imprime" compara o bloco inteiro. Se o critério ou o gerador mudar e este README não, os dois falham.
 
+O comando e os testes passam pelas mesmas funções de `src/dataset.ts`:
+
+```mermaid
+flowchart LR
+    G["generateDataset()<br/>semente 20261011"] --> M["measure()<br/>classify() em cada série"]
+    M --> F["formatReport()"]
+    G --> J["dataset/views.json"]
+    F --> C["npm run dataset<br/>imprime o relatório"]
+    F --> T["dataset.test.ts<br/>confere este README e o arquivo"]
+    J --> T
+```
+
 ## O que ele não detecta
 
 - Compra diluída: views compradas espalhadas ao longo de dias, com o mesmo acaso do tráfego real. É a família `bought_drip`, e nenhuma das 40 é pega.
@@ -213,5 +271,5 @@ test/dataset.test.ts
 
 ## Uso de IA
 
-- Feito com IA (Claude Code): o critério e os sinais, a regra de combinação, o gerador do dataset e as famílias, o código, os testes, a execução com curl de `EXEMPLOS.md` e este README. Na revisão, a IA achou e corrigiu três pontos. O motivo dizia "fez 102% do caminho" quando o degrau começava abaixo da mediana, e o teste "viral que estoura numa hora só mas decai aos poucos fica inconclusivo" fixa o texto com 100%. O exemplo de queda abrupta dos testes era, sem querer, um robô constante, e a lisura disparava junto. A primeira medição deixava passar cinco robôs de platô, e o limite de `too_smooth` subiu de 30% para 50%, como explicado em Critério.
-- Revisado por mim: PENDENTE
+- Feito com IA (Claude Code): o critério e os sinais, a regra de combinação, o gerador do dataset e as famílias, o código, os testes, a execução com curl de `EXEMPLOS.md` e este README. Na revisão, a IA achou e corrigiu três pontos. O motivo dizia "fez 102% do caminho" quando o degrau começava abaixo da mediana, e o teste "viral que estoura numa hora só mas decai aos poucos fica inconclusivo" fixa o texto com 100%. O exemplo de queda abrupta dos testes era, sem querer, um robô constante, e a lisura disparava junto. A primeira medição deixava passar cinco robôs de platô, e o limite de `too_smooth` subiu de 30% para 50%, como explicado em Critério. A tabela de Visão rápida, os diagramas e os esboços hora a hora deste README também foram feitos com IA.
+- Revisado por mim: os sinais e a regra de combinação, o caso inconclusivo em que o classificador prefere não acusar, o ajuste do limite de too_smooth e o aviso de que a taxa tende a ser otimista, o teste que compara o README com o comando, a lista do que o classificador não detecta e este README.
